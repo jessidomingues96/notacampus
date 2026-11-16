@@ -1,0 +1,14 @@
+.aws-sam/
+target/
+*.class
+.idea/
+.vscode/
+*.iml
+.env
+samconfig.local.toml
+*.zip
+saida.json
+saida.json
+saida.json
+notacampus/
+saida.json
