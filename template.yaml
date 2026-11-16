@@ -63,6 +63,22 @@ Resources:
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
 
+  EnviosTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-envios"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: id, KeyType: HASH }
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
   # ---------------------------------------------------------------------------
   # Mensageria / notificações
   # ---------------------------------------------------------------------------
@@ -188,11 +204,31 @@ Resources:
       Environment:
         Variables:
           TOPIC_ARN: !Ref NotificacaoTopic
+          ENVIOS_TABLE_NAME: !Ref EnviosTable
       Policies:
         - Statement:
             - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+              Resource: !GetAtt EnviosTable.Arn
+              Condition:
+                ForAllValues:StringLike:
+                  dynamodb:LeadingKeys: ["URGENCIA#*"]
+            - Effect: Allow
               Action: sns:Publish
               Resource: !Ref NotificacaoTopic
+            # O alias não é um ARN de chave: limita key/* pelo alias e pelo uso no SNS deste tópico.
+            - Sid: UsarChaveSnsNotificacoes
+              Effect: Allow
+              Action:
+                - kms:GenerateDataKey*
+                - kms:Decrypt
+              Resource: !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+              Condition:
+                ForAnyValue:StringEquals:
+                  kms:ResourceAliases: alias/aws/sns
+                StringEquals:
+                  kms:ViaService: !Sub "sns.${AWS::Region}.${AWS::URLSuffix}"
+                  kms:EncryptionContext:aws:sns:topicArn: !Ref NotificacaoTopic
             - Effect: Allow
               Action: sqs:SendMessage
               Resource: !GetAtt NotificacaoDLQ.Arn
@@ -203,7 +239,9 @@ Resources:
             Stream: !GetAtt AvaliacoesTable.StreamArn
             StartingPosition: LATEST
             BatchSize: 10
-            MaximumRetryAttempts: 3
+            # Permite recuperar reservas de 180s após timeout; falhas persistentes vão à DLQ em até 1h.
+            MaximumRetryAttempts: -1
+            MaximumRecordAgeInSeconds: 3600
             BisectBatchOnFunctionError: true
             FunctionResponseTypes:
               - ReportBatchItemFailures
@@ -232,8 +270,15 @@ Resources:
           TABLE_NAME: !Ref AvaliacoesTable
           INDEX_NAME: dia-index
           TOPIC_ARN: !Ref NotificacaoTopic
+          ENVIOS_TABLE_NAME: !Ref EnviosTable
       Policies:
         - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem]
+              Resource: !GetAtt EnviosTable.Arn
+              Condition:
+                ForAllValues:StringLike:
+                  dynamodb:LeadingKeys: ["RELATORIO#*"]
             - Effect: Allow
               Action: dynamodb:Query
               Resource:
@@ -242,6 +287,18 @@ Resources:
             - Effect: Allow
               Action: sns:Publish
               Resource: !Ref NotificacaoTopic
+            - Sid: UsarChaveSnsNotificacoes
+              Effect: Allow
+              Action:
+                - kms:GenerateDataKey*
+                - kms:Decrypt
+              Resource: !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*"
+              Condition:
+                ForAnyValue:StringEquals:
+                  kms:ResourceAliases: alias/aws/sns
+                StringEquals:
+                  kms:ViaService: !Sub "sns.${AWS::Region}.${AWS::URLSuffix}"
+                  kms:EncryptionContext:aws:sns:topicArn: !Ref NotificacaoTopic
       Events:
         AgendaSemanal:
           Type: Schedule
@@ -436,6 +493,8 @@ Outputs:
     Value: !Ref AvaliacaoApiApiKey
   TabelaAvaliacoes:
     Value: !Ref AvaliacoesTable
+  TabelaEnvios:
+    Value: !Ref EnviosTable
   TopicoNotificacoes:
     Value: !Ref NotificacaoTopic
   Dashboard:

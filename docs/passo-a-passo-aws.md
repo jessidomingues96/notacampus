@@ -64,16 +64,16 @@ sam --version
 Na raiz do projeto:
 
 ```bash
-mvn -B test                                 # 28 testes JUnit das 3 funções
+mvn -B test                                 # testes JUnit das 3 funções
 sam validate --lint                         # valida o template
 sam build
 sam deploy --parameter-overrides AdminEmail=<seu-email@exemplo.com>
 ```
 
 Na primeira execução o SAM cria automaticamente um bucket S3 gerenciado (`aws-sam-cli-managed-default`) para guardar o código empacotado. O deploy leva de 2 a 5 minutos e cria:
-tabela DynamoDB, 3 funções Lambda, API Gateway, tópicos SNS, fila DLQ, regra de agendamento, grupos de log, 5 alarmes e 1 dashboard.
+duas tabelas DynamoDB (`avaliacoes` e `envios`), 3 funções Lambda, API Gateway, tópicos SNS, fila DLQ, regra de agendamento, grupos de log, 5 alarmes e 1 dashboard.
 
-Ao final, anote os **Outputs**: `ApiUrl`, `ApiKeyId`, `TabelaAvaliacoes`, `Dashboard`.
+Ao final, anote os **Outputs**: `ApiUrl`, `ApiKeyId`, `TabelaAvaliacoes`, `TabelaEnvios`, `Dashboard`.
 
 ## Etapa 5 — Confirmar as assinaturas de e-mail (obrigatório)
 
@@ -128,7 +128,14 @@ Para conferir: Console → **SNS** → *Subscriptions* → o status deve ser **C
        --payload "{\"data_fim\": \"$(date +%F)\", \"dias\": 7}" /dev/stdout
    ```
 
-   Confira o e-mail do relatório (média, quantidade por dia e por urgência).
+   Confira o e-mail do relatório (média, quantidade por dia e por urgência e todos os feedbacks,
+   com descrições completas). Quando houver várias mensagens, leia-as pela indicação
+   `(parte X/Y)` no assunto; a ordem de chegada pode variar. O resumo fica na primeira parte.
+   Repetir a mesma chamada (`data_fim` e `dias`) retorna os totais persistidos sem reenviar as partes
+   confirmadas. Caso o envio tenha falhado, a execução reutiliza o conteúdo salvo e retoma as partes
+   pendentes. No console DynamoDB, a tabela `notacampus-envios` mostra as reservas e o progresso.
+   Para verificar a deduplicação de alertas, reprocesse o mesmo evento com o mesmo id de avaliação;
+   enviar outro POST gera um novo id e representa outra avaliação, que pode produzir outro alerta.
    O agendamento automático (segundas, 08:00 BRT) pode ser visto em Console → **EventBridge** → *Rules*.
 
 ## Etapa 7 — Deploy automatizado com GitHub Actions (OIDC)
@@ -267,7 +274,8 @@ sam delete --stack-name notacampus
 ```
 
 Itens que **permanecem** e devem ser removidos manualmente se quiser zerar o custo:
-- Tabela DynamoDB `notacampus-avaliacoes` (proteção `Retain`)
+- Tabelas DynamoDB `notacampus-avaliacoes` e `notacampus-envios` (proteção `Retain`); apagar `envios`
+  remove os comprovantes e permite reenviar eventos antigos.
 - Bucket S3 `aws-sam-cli-managed-default-*` e a stack `aws-sam-cli-managed-default`
 - Role e provedor OIDC do GitHub (se não for mais usar)
 

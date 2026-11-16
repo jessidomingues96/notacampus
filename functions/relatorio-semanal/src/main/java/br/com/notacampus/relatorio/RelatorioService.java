@@ -1,6 +1,7 @@
 package br.com.notacampus.relatorio;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -27,8 +28,8 @@ public final class RelatorioService {
     private static final DateTimeFormatter DATA_HORA = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
 
     public static final List<String> URGENCIAS = List.of("CRITICA", "MEDIA", "BAIXA");
-    static final int LIMITE_LISTA = 100;
-    static final int DESCRICAO_RESUMO = 200;
+    // Margem abaixo dos 256 KiB permitidos pelo SNS para tópicos com assinatura de e-mail.
+    static final int LIMITE_MENSAGEM_BYTES = 240 * 1024;
 
     /** Totais do período. {@code media} é {@code null} quando não há avaliações. */
     public record Resumo(int total, Double media, Map<LocalDate, Integer> porDia, Map<String, Integer> porUrgencia) {
@@ -43,20 +44,33 @@ public final class RelatorioService {
     private final AvaliacaoConsulta consulta;
     private final Notificador notificador;
     private final Clock relogio;
+    private final EnvioIdempotente envios;
 
-    public RelatorioService(AvaliacaoConsulta consulta, Notificador notificador) {
-        this(consulta, notificador, Clock.systemUTC());
+    public RelatorioService(AvaliacaoConsulta consulta, Notificador notificador, EnvioIdempotente envios) {
+        this(consulta, notificador, envios, Clock.systemUTC());
     }
 
-    public RelatorioService(AvaliacaoConsulta consulta, Notificador notificador, Clock relogio) {
+    public RelatorioService(AvaliacaoConsulta consulta, Notificador notificador, EnvioIdempotente envios, Clock relogio) {
         this.consulta = consulta;
         this.notificador = notificador;
+        this.envios = envios;
         this.relogio = relogio;
     }
 
     public Resultado gerar(Map<String, Object> evento) {
-        List<LocalDate> dias = Periodo.calcular(evento, LocalDate.now(relogio.withZone(FUSO)));
+        // A data do evento permanece estável se a retentativa ocorrer depois da meia-noite.
+        Object horario = evento == null ? null : evento.get("time");
+        LocalDate hoje = horario == null ? LocalDate.now(relogio.withZone(FUSO))
+                : Instant.parse(horario.toString()).atZone(FUSO).toLocalDate();
+        List<LocalDate> dias = Periodo.calcular(evento, hoje);
+        String chave = "RELATORIO#" + dias.get(0) + "#" + dias.get(dias.size() - 1);
+        var resultado = envios.executar(chave, () -> preparar(dias),
+                mensagem -> notificador.publicar(mensagem.assunto(), mensagem.corpo()));
+        LOG.log(System.Logger.Level.INFO, "relatorio_processado chave=" + chave + " total=" + resultado.total());
+        return new Resultado(resultado.total(), resultado.media());
+    }
 
+    private RegistroEnvios.Plano preparar(List<LocalDate> dias) {
         List<Avaliacao> avaliacoes = new ArrayList<>();
         for (LocalDate dia : dias) {
             avaliacoes.addAll(consulta.buscarPorDia(dia));
@@ -64,11 +78,9 @@ public final class RelatorioService {
 
         Resumo resumo = consolidar(avaliacoes, dias);
         Mensagem mensagem = formatar(dias, resumo, avaliacoes);
-        notificador.publicar(mensagem.assunto(), mensagem.corpo());
-
-        LOG.log(System.Logger.Level.INFO,
-                "relatorio_enviado total=" + resumo.total() + " media=" + resumo.media());
-        return new Resultado(resumo.total(), resumo.media());
+        var partes = dividir(mensagem).stream()
+                .map(parte -> new RegistroEnvios.Mensagem(parte.assunto(), parte.corpo())).toList();
+        return new RegistroEnvios.Plano(partes, resumo.total(), resumo.media());
     }
 
     /** Calcula total, média (2 casas), quantidade por dia e por urgência. */
@@ -117,18 +129,50 @@ public final class RelatorioService {
         if (ordenadas.isEmpty()) {
             sb.append("  (nenhum feedback no período)\n");
         }
-        for (Avaliacao a : ordenadas.stream().limit(LIMITE_LISTA).toList()) {
-            sb.append("  - ").append(resumir(a.descricao())).append(" | ").append(a.urgencia()).append(" | ")
+        for (Avaliacao a : ordenadas) {
+            sb.append("  - ").append(a.descricao()).append(" | ").append(a.urgencia()).append(" | ")
                     .append(a.dataEnvio().atZone(FUSO).format(DATA_HORA)).append('\n');
-        }
-        if (ordenadas.size() > LIMITE_LISTA) {
-            sb.append("  ... e mais ").append(ordenadas.size() - LIMITE_LISTA).append(" feedbacks (lista truncada).\n");
         }
         return new Mensagem(assunto, sb.toString());
     }
 
-    private static String resumir(String descricao) {
-        String limpa = descricao.replaceAll("\\s+", " ").strip();
-        return limpa.length() > DESCRICAO_RESUMO ? limpa.substring(0, DESCRICAO_RESUMO - 3) + "..." : limpa;
+    /** Divide sem perder texto nem separar pares de substitutos Unicode; prefere fins de linha. */
+    static List<Mensagem> dividir(Mensagem mensagem) {
+        String corpo = mensagem.corpo();
+        List<String> corpos = new ArrayList<>();
+        int inicio = 0;
+        while (inicio < corpo.length()) {
+            int fim = inicio;
+            int bytes = 0;
+            int fimLinha = inicio;
+            while (fim < corpo.length()) {
+                int ponto = corpo.codePointAt(fim);
+                int tamanho = ponto <= 0x7F ? 1 : ponto <= 0x7FF ? 2 : ponto <= 0xFFFF ? 3 : 4;
+                if (bytes + tamanho > LIMITE_MENSAGEM_BYTES) {
+                    break;
+                }
+                bytes += tamanho;
+                fim += Character.charCount(ponto);
+                if (ponto == '\n') {
+                    fimLinha = fim;
+                }
+            }
+            if (fim < corpo.length() && fimLinha > inicio) {
+                fim = fimLinha;
+            }
+            corpos.add(corpo.substring(inicio, fim));
+            inicio = fim;
+        }
+        if (corpos.size() <= 1) {
+            return List.of(mensagem);
+        }
+        List<Mensagem> partes = new ArrayList<>();
+        for (int i = 0; i < corpos.size(); i++) {
+            String sufixo = " (parte " + (i + 1) + "/" + corpos.size() + ")";
+            String assunto = Assunto.sanitizar(mensagem.assunto());
+            assunto = assunto.substring(0, Math.min(assunto.length(), Assunto.LIMITE - sufixo.length()));
+            partes.add(new Mensagem(assunto + sufixo, corpos.get(i)));
+        }
+        return partes;
     }
 }

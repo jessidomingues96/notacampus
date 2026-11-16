@@ -16,9 +16,11 @@ public final class NotificarUrgenciaService {
     static final String URGENCIA_CRITICA = "CRITICA";
 
     private final Notificador notificador;
+    private final EnvioIdempotente envios;
 
-    public NotificarUrgenciaService(Notificador notificador) {
+    public NotificarUrgenciaService(Notificador notificador, EnvioIdempotente envios) {
         this.notificador = notificador;
+        this.envios = envios;
     }
 
     /**
@@ -37,9 +39,16 @@ public final class NotificarUrgenciaService {
                 if (!URGENCIA_CRITICA.equals(imagem.get("urgencia"))) {
                     continue;
                 }
-                MensagemUrgencia.Mensagem mensagem = MensagemUrgencia.montar(imagem);
-                notificador.publicar(mensagem.assunto(), mensagem.corpo());
-                LOG.log(System.Logger.Level.INFO, "notificacao_enviada id=" + imagem.get("id"));
+                String id = imagem.get("id");
+                if (id == null || id.isBlank()) {
+                    throw new IllegalArgumentException("Avaliação crítica sem id.");
+                }
+                envios.executar("URGENCIA#" + id, () -> {
+                    var mensagem = MensagemUrgencia.montar(imagem);
+                    return new RegistroEnvios.Plano(List.of(
+                            new RegistroEnvios.Mensagem(mensagem.assunto(), mensagem.corpo())), 1, null);
+                }, mensagem -> notificador.publicar(mensagem.assunto(), mensagem.corpo()));
+                LOG.log(System.Logger.Level.INFO, "notificacao_processada id=" + id);
             } catch (RuntimeException e) {
                 LOG.log(System.Logger.Level.ERROR, "Falha ao notificar o registro " + registro.sequencia(), e);
                 falhas.add(registro.sequencia());

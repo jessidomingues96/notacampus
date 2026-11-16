@@ -13,7 +13,7 @@ import software.amazon.awssdk.services.sns.SnsClient;
  * Função Lambda 3 - agendada pelo EventBridge (segundas-feiras, 08:00 BRT).
  *
  * <p>Variáveis de ambiente: {@code TABLE_NAME}, {@code INDEX_NAME} (padrão {@code dia-index}) e
- * {@code TOPIC_ARN}. O evento pode conter {@code data_fim} e {@code dias} para execuções manuais.
+ * {@code TOPIC_ARN} e {@code ENVIOS_TABLE_NAME}. O evento pode conter {@code data_fim} e {@code dias}.
  */
 public class RelatorioSemanalHandler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
@@ -53,6 +53,7 @@ public class RelatorioSemanalHandler implements RequestHandler<Map<String, Objec
         String indice = System.getenv().getOrDefault("INDEX_NAME", "dia-index");
         return new RelatorioService(
                 new DynamoAvaliacaoConsulta(dynamo, System.getenv("TABLE_NAME"), indice),
-                new SnsNotificador(sns, System.getenv("TOPIC_ARN")));
+                new SnsNotificador(sns, System.getenv("TOPIC_ARN")),
+                new EnvioIdempotente(new DynamoRegistroEnvios(dynamo, System.getenv("ENVIOS_TABLE_NAME"))));
     }
 }

@@ -11,11 +11,12 @@ import java.util.Map;
 import software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
 /**
  * Função Lambda 2 - disparada pelo DynamoDB Streams (apenas INSERT com urgência CRITICA).
  *
- * <p>Variável de ambiente obrigatória: {@code TOPIC_ARN}. Responde com
+ * <p>Variáveis obrigatórias: {@code TOPIC_ARN} e {@code ENVIOS_TABLE_NAME}. Responde com
  * {@code batchItemFailures} para reprocessar somente os registros que falharam.
  */
 public class NotificarUrgenciaHandler implements RequestHandler<DynamodbEvent, StreamsEventResponse> {
@@ -67,6 +68,10 @@ public class NotificarUrgenciaHandler implements RequestHandler<DynamodbEvent, S
                 .credentialsProvider(EnvironmentVariableCredentialsProvider.create())
                 .httpClient(UrlConnectionHttpClient.create())
                 .build();
-        return new NotificarUrgenciaService(new SnsNotificador(sns, System.getenv("TOPIC_ARN")));
+        DynamoDbClient dynamo = DynamoDbClient.builder()
+                .credentialsProvider(EnvironmentVariableCredentialsProvider.create())
+                .httpClient(UrlConnectionHttpClient.create()).build();
+        return new NotificarUrgenciaService(new SnsNotificador(sns, System.getenv("TOPIC_ARN")),
+                new EnvioIdempotente(new DynamoRegistroEnvios(dynamo, System.getenv("ENVIOS_TABLE_NAME"))));
     }
 }

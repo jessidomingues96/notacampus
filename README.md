@@ -30,10 +30,12 @@ flowchart LR
     F1 -->|PutItem| D[(DynamoDB<br/>avaliacoes)]
     D -->|Streams: INSERT + CRITICA| F2[λ notificar-urgencia]
     F2 -->|Publish| T[SNS notificações]
+    F2 -->|controle de envio| C[(DynamoDB<br/>envios)]
     F2 -.falhas.-> Q[SQS DLQ]
     E[EventBridge<br/>seg 08:00 BRT] --> F3[λ relatorio-semanal]
     F3 -->|Query GSI dia-index| D
     F3 -->|Publish| T
+    F3 -->|snapshot e progresso| C
     T -->|e-mail| ADM[Administrador]
     CW[CloudWatch<br/>logs, métricas, alarmes, dashboard] -->|alarmes| T2[SNS alarmes]
     T2 -->|e-mail| ADM
@@ -48,6 +50,7 @@ flowchart LR
 | **λ `relatorio-semanal`** | Somente **consolidar e enviar** o relatório semanal. |
 | **API Gateway** | Entrada HTTP, API key, throttling e validação de schema. |
 | **DynamoDB** | Persistência (on-demand, criptografado, PITR) + Streams + GSI por dia. |
+| **DynamoDB `envios`** | Reservas condicionais, conteúdo dos envios e progresso por parte para controlar duplicidades. |
 | **SNS** | Entrega de e-mails ao administrador (urgências, relatório e alarmes). |
 | **EventBridge** | Agendamento semanal do relatório. |
 | **SQS (DLQ)** | Guarda notificações críticas que não puderam ser entregues. |
@@ -93,7 +96,9 @@ Cada função segue a mesma organização em camadas:
 
 Isso permite testar toda a regra de negócio com JUnit, sem AWS. Cada função é um projeto Maven
 independente porque o `sam build` empacota cada diretório de forma isolada; por isso classes
-minúsculas como `SnsNotificador` e `Assunto` existem em mais de uma função.
+como `SnsNotificador`, `Assunto`, `RegistroEnvios`, `EnvioIdempotente` e `DynamoRegistroEnvios` existem
+em mais de uma função. O controle de envio tem a mesma implementação nos dois módulos e deve ser
+mantido e validado em ambos.
 
 ## 4. Instruções de deploy
 
@@ -146,8 +151,9 @@ faz o **deploy automático** em push na `main`.
 ```bash
 sam delete
 ```
-A tabela DynamoDB usa `DeletionPolicy: Retain` (proteção dos dados) e **permanece** após o
-`sam delete`; apague-a manualmente se quiser zerar o custo.
+As tabelas DynamoDB usam `DeletionPolicy: Retain` (proteção dos dados) e **permanecem** após o
+`sam delete`. A tabela `envios` preserva também os comprovantes de envio e os textos dos relatórios;
+sua remoção permite que eventos antigos sejam enviados novamente.
 
 ## 5. Como usar / testar
 
@@ -198,9 +204,10 @@ aws lambda invoke --function-name notacampus-relatorio-semanal --region sa-east-
 | Handler | `br.com.notacampus.notificar.NotificarUrgenciaHandler::handleRequest` |
 | Gatilho | DynamoDB Streams, filtrado: `INSERT` + `urgencia = CRITICA` |
 | Ação | Publica e-mail no SNS com **Descrição**, **Urgência** e **Data de envio** |
-| Resiliência | Retry (3x), *bisect batch*, falhas parciais (`batchItemFailures`) e DLQ (SQS) |
-| Variável de ambiente | `TOPIC_ARN` |
-| Permissões IAM | `sns:Publish` no tópico; `sqs:SendMessage` na DLQ |
+| Resiliência | Retentativas do Stream até a idade máxima de 1 hora, *bisect batch*, falhas parciais (`batchItemFailures`) e destino de falha SQS |
+| Idempotência | Chave `URGENCIA#<id da avaliação>`; alertas confirmados não são publicados novamente pela aplicação |
+| Variáveis de ambiente | `TOPIC_ARN`, `ENVIOS_TABLE_NAME` |
+| Permissões IAM | `sns:Publish` no tópico; `sqs:SendMessage` na DLQ; `GetItem`/`PutItem`/`UpdateItem` na tabela de envios, apenas para chaves `URGENCIA#*`; `kms:GenerateDataKey*` e `kms:Decrypt` na chave `alias/aws/sns`, somente via SNS para este tópico |
 
 ### `relatorio-semanal`
 | | |
@@ -208,12 +215,51 @@ aws lambda invoke --function-name notacampus-relatorio-semanal --region sa-east-
 | Handler | `br.com.notacampus.relatorio.RelatorioSemanalHandler::handleRequest` |
 | Gatilho | EventBridge `cron(0 11 ? * MON *)` — segundas, 08:00 BRT |
 | Período | 7 dias completos anteriores à execução (parametrizável via evento: `data_fim`, `dias`) |
-| Conteúdo | Média das avaliações, total, quantidade **por dia**, quantidade **por urgência** e lista com descrição, urgência e data de envio |
+| Conteúdo | Média das avaliações, total, quantidade **por dia**, quantidade **por urgência** e **todos** os feedbacks com descrição completa, urgência e data de envio |
+| Entrega | E-mail via SNS; relatórios grandes são divididos em partes numeradas no assunto, com até 240 KiB de texto UTF-8 por mensagem. O resumo aparece na primeira parte e os detalhes continuam nas demais, sem cortes de conteúdo. |
 | Acesso a dados | `Query` paginada no GSI `dia-index` (sem `Scan`) |
-| Variáveis de ambiente | `TABLE_NAME`, `INDEX_NAME`, `TOPIC_ARN` |
-| Permissões IAM | `dynamodb:Query` (tabela + índice); `sns:Publish` |
+| Idempotência | Chave `RELATORIO#<início>#<fim>`; conteúdo e resumo persistidos antes de publicar, com confirmação de cada parte e retomada das pendentes |
+| Variáveis de ambiente | `TABLE_NAME`, `INDEX_NAME`, `TOPIC_ARN`, `ENVIOS_TABLE_NAME` |
+| Permissões IAM | `dynamodb:Query` (tabela + índice); `sns:Publish`; `GetItem`/`PutItem`/`UpdateItem` na tabela de envios, apenas para chaves `RELATORIO#*`; `kms:GenerateDataKey*` e `kms:Decrypt` na chave `alias/aws/sns`, somente via SNS para este tópico |
 
 > Os assuntos dos e-mails são normalizados para ASCII (`Assunto.sanitizar`), pois o SNS restringe o campo *Subject*.
+
+O relatório preserva as descrições armazenadas, incluindo acentos, emojis e quebras de linha. Para
+respeitar o limite de 256 KiB do SNS com assinaturas de e-mail, a divisão prefere finais de linha e
+mantém os caracteres Unicode inteiros. Leia as partes pela numeração do assunto; a ordem de chegada
+dos e-mails pode variar. [Limites de publicação do SNS](https://docs.aws.amazon.com/sns/latest/api/API_Publish.html).
+
+### Controle de duplicidades e retomada
+
+A tabela privada `${stack}-envios` guarda o estado de cada trabalho (`PROCESSANDO` ou `ENVIADO`),
+seu proprietário, o vencimento da reserva, o conteúdo e a próxima parte a enviar. Atualizações
+condicionais permitem apenas um proprietário ativo. As reservas duram 180 segundos, acima do
+timeout máximo de 120 segundos das funções; após uma interrupção, outra execução pode assumir o
+trabalho. Falhas capturadas liberam a reserva imediatamente. Indisponibilidade da tabela impede a
+publicação, para não enviar sem controle persistente.
+
+O relatório é preparado uma única vez por intervalo: retentativas reutilizam o mesmo conteúdo,
+mesmo se surgirem novos dados. Partes já confirmadas são ignoradas. O campo `time` do EventBridge
+fixa a data de referência entre retentativas; para repetir uma chamada manual, informe o mesmo
+`data_fim` e `dias`. Uma nova solicitação para um intervalo concluído retorna os totais salvos e
+não gera outro e-mail. Não há expiração automática dos comprovantes; mantenha a tabela para
+preservar a deduplicação.
+
+O aceite do SNS e a confirmação no DynamoDB são operações separadas: se o SNS aceitar a mensagem
+e a função perder a resposta ou falhar antes de confirmar a parte, ela poderá ser reenviada. O SNS
+Standard também pode entregar cópias ao destinatário. Portanto, o controle evita reenvios já
+confirmados e concorrência na aplicação, mas não garante entrega única de e-mail em toda situação.
+[Comportamento de entrega do SNS](https://aws.amazon.com/sns/faqs/).
+
+Os testes unitários rodam com `mvn -B test`. Para validar também as operações condicionais reais,
+inicie um DynamoDB Local e rode:
+
+```bash
+mvn -B -Dnotacampus.dynamodb.endpoint=http://127.0.0.1:8013 test
+```
+
+Esses testes criam e removem tabelas temporárias apenas em um endpoint de loopback; sem a propriedade,
+as classes de integração são ignoradas. Cobrem concorrência, expiração, snapshots e retomada parcial.
 
 ## 7. Monitoramento e alertas
 
@@ -232,6 +278,7 @@ aws lambda invoke --function-name notacampus-relatorio-semanal --region sa-east-
 - **Autenticação da API:** API key obrigatória + *usage plan* (10 req/s, burst 20, 10.000/dia).
 - **Validação de entrada:** JSON Schema no API Gateway + validação no código (rejeita booleano, texto em `nota`, decimais etc.).
 - **Dados em repouso:** DynamoDB com criptografia (SSE), SQS com SSE, SNS de notificações com KMS (`alias/aws/sns`).
+- **Uso da chave KMS:** as funções de notificação e relatório podem gerar e decifrar chaves de dados apenas com `alias/aws/sns` da conta e região do deploy, via SNS e com o contexto do tópico de notificações. O alias é restringido por `kms:ResourceAliases`, pois operações criptográficas exigem ARN de chave no campo `Resource`. [Referência AWS](https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html).
 - **Dados em trânsito:** HTTPS obrigatório no API Gateway.
 - **Proteção de dados:** *Point-in-Time Recovery* no DynamoDB; tabela com `DeletionPolicy: Retain`.
 - **Privacidade:** conteúdo dos feedbacks fora dos logs; mensagens de erro genéricas ao cliente.

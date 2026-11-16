@@ -34,7 +34,7 @@ public class NotificarUrgenciaServiceTest {
 
     private static RegistroStream registro(String sequencia, String evento, String urgencia) {
         return new RegistroStream(sequencia, evento, Map.of(
-                "id", "abc",
+                "id", "avaliacao-" + sequencia,
                 "descricao", "Professor não apareceu",
                 "urgencia", urgencia,
                 "nota", "1",
@@ -44,7 +44,7 @@ public class NotificarUrgenciaServiceTest {
     @Test
     public void publicaParaRegistroCritico() {
         NotificadorFalso notificador = new NotificadorFalso();
-        var falhas = new NotificarUrgenciaService(notificador).processar(List.of(registro("1", "INSERT", "CRITICA")));
+        var falhas = new NotificarUrgenciaService(notificador, new EnvioIdempotente(new RegistroEnviosMemoria())).processar(List.of(registro("1", "INSERT", "CRITICA")));
 
         assertTrue(falhas.isEmpty());
         assertEquals(1, notificador.assuntos.size());
@@ -57,7 +57,7 @@ public class NotificarUrgenciaServiceTest {
     @Test
     public void assuntoEAsciiESemQuebrasDeLinha() {
         NotificadorFalso notificador = new NotificadorFalso();
-        new NotificarUrgenciaService(notificador).processar(List.of(registro("1", "INSERT", "CRITICA")));
+        new NotificarUrgenciaService(notificador, new EnvioIdempotente(new RegistroEnviosMemoria())).processar(List.of(registro("1", "INSERT", "CRITICA")));
 
         String assunto = notificador.assuntos.get(0);
         assertTrue(assunto.contains("URGENTE"));
@@ -69,7 +69,7 @@ public class NotificarUrgenciaServiceTest {
     @Test
     public void ignoraNaoCriticosEEventosQueNaoSaoInsert() {
         NotificadorFalso notificador = new NotificadorFalso();
-        var falhas = new NotificarUrgenciaService(notificador).processar(List.of(
+        var falhas = new NotificarUrgenciaService(notificador, new EnvioIdempotente(new RegistroEnviosMemoria())).processar(List.of(
                 registro("1", "INSERT", "MEDIA"),
                 registro("2", "INSERT", "BAIXA"),
                 registro("3", "MODIFY", "CRITICA"),
@@ -82,7 +82,7 @@ public class NotificarUrgenciaServiceTest {
     @Test
     public void reportaSomenteOsRegistrosComFalha() {
         NotificadorFalso notificador = new NotificadorFalso(2);
-        var falhas = new NotificarUrgenciaService(notificador).processar(List.of(
+        var falhas = new NotificarUrgenciaService(notificador, new EnvioIdempotente(new RegistroEnviosMemoria())).processar(List.of(
                 registro("1", "INSERT", "CRITICA"),
                 registro("2", "INSERT", "CRITICA"),
                 registro("3", "INSERT", "CRITICA")));
@@ -94,9 +94,43 @@ public class NotificarUrgenciaServiceTest {
     @Test
     public void registroSemImagemNaoQuebraOLote() {
         NotificadorFalso notificador = new NotificadorFalso();
-        var falhas = new NotificarUrgenciaService(notificador)
+        var falhas = new NotificarUrgenciaService(notificador, new EnvioIdempotente(new RegistroEnviosMemoria()))
                 .processar(List.of(new RegistroStream("1", "INSERT", null)));
         assertTrue(falhas.isEmpty());
+        assertEquals(0, notificador.chamadas);
+    }
+
+    @Test
+    public void reprocessamentoEmOutraInstanciaNaoRepeteAlertaConfirmado() {
+        var registro = new RegistroEnviosMemoria();
+        var notificador = new NotificadorFalso();
+        var evento = registro("1", "INSERT", "CRITICA");
+        var primeiro = new NotificarUrgenciaService(notificador, new EnvioIdempotente(registro));
+        var segundo = new NotificarUrgenciaService(notificador, new EnvioIdempotente(registro));
+        assertTrue(primeiro.processar(List.of(evento, evento)).isEmpty());
+        assertTrue(segundo.processar(List.of(evento)).isEmpty());
+        assertEquals(1, notificador.chamadas);
+    }
+
+    @Test
+    public void retentativaDeLoteNaoRepeteAlertasConfirmados() {
+        var registro = new RegistroEnviosMemoria();
+        var notificador = new NotificadorFalso(2);
+        var lote = List.of(registro("1", "INSERT", "CRITICA"), registro("2", "INSERT", "CRITICA"),
+                registro("3", "INSERT", "CRITICA"));
+        assertEquals(List.of("2"), new NotificarUrgenciaService(notificador, new EnvioIdempotente(registro)).processar(lote));
+        assertTrue(new NotificarUrgenciaService(notificador, new EnvioIdempotente(registro)).processar(lote).isEmpty());
+        assertEquals(4, notificador.chamadas);
+        assertEquals(3, notificador.corpos.size());
+    }
+
+    @Test
+    public void falhaAoReservarNaoPublicaAlertaEReportaRegistroPendente() {
+        var registro = new RegistroEnviosMemoria();
+        registro.reservar("URGENCIA#avaliacao-1");
+        var notificador = new NotificadorFalso();
+        assertEquals(List.of("1"), new NotificarUrgenciaService(notificador, new EnvioIdempotente(registro))
+                .processar(List.of(registro("1", "INSERT", "CRITICA"))));
         assertEquals(0, notificador.chamadas);
     }
 
