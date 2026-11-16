@@ -9,20 +9,23 @@ public class UrgenciaTest {
 
     @Test
     public void notasDe0a3SaoCriticas() {
-        assertEquals(Urgencia.CRITICA, Urgencia.deNota(0));
-        assertEquals(Urgencia.CRITICA, Urgencia.deNota(3));
+        for (int nota = 0; nota <= 3; nota++) {
+            assertEquals(Urgencia.CRITICA, Urgencia.deNota(nota));
+        }
     }
 
     @Test
-    public void notasDe4a6SaoBaixas() {
-        assertEquals(Urgencia.BAIXA, Urgencia.deNota(4));
-        assertEquals(Urgencia.BAIXA, Urgencia.deNota(6));
+    public void notasDe4a6ExigemAtencao() {
+        for (int nota = 4; nota <= 6; nota++) {
+            assertEquals(Urgencia.ATENCAO, Urgencia.deNota(nota));
+        }
     }
 
     @Test
-    public void notasDe7a10SaoMedias() {
-        assertEquals(Urgencia.MEDIA, Urgencia.deNota(7));
-        assertEquals(Urgencia.MEDIA, Urgencia.deNota(10));
+    public void notasDe7a10SaoNormais() {
+        for (int nota = 7; nota <= 10; nota++) {
+            assertEquals(Urgencia.NORMAL, Urgencia.deNota(nota));
+        }
     }
 
     @Test

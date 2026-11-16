@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   NotaCampus - plataforma de feedback de aulas (Tech Challenge - Fase 4).
-  API Gateway + 3 funções Lambda em Java 21 (serverless) + DynamoDB + SNS + CloudWatch.
+  API Gateway + 3 funções Lambda em Java 21 (serverless) + DynamoDB + SNS + S3/SQS + CloudWatch.
 
 Parameters:
   Stage:
@@ -13,7 +13,7 @@ Parameters:
   AdminEmail:
     Type: String
     AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
-    Description: E-mail do administrador (recebe urgências, relatório semanal e alarmes).
+    Description: Destinatário administrativo autorizado para urgências, relatórios e alarmes. Não concede acesso à AWS.
   RetencaoLogsDias:
     Type: Number
     Default: 30
@@ -111,22 +111,91 @@ Resources:
       Protocol: email
       Endpoint: !Ref AdminEmail
 
-  # Fila de mensagens não processadas (stream -> notificação)
+  # Avisos dos lotes arquivados; os eventos completos ficam no S3 para sobreviver à retenção do Stream.
   NotificacaoDLQ:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub "${AWS::StackName}-notificacao-dlq"
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
+      VisibilityTimeout: 600
+
+  NotificacaoDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref NotificacaoDLQ]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificacaoDLQ.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                # Nome explícito evita dependência circular entre bucket e política da fila.
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:s3:::${AWS::StackName}-${AWS::AccountId}-${AWS::Region}-falhas"
+
+  FalhasNotificacaoBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: NotificacaoDLQPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-${AWS::AccountId}-${AWS::Region}-falhas"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt NotificacaoDLQ.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: aws/lambda/
+
+  FalhasNotificacaoBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FalhasNotificacaoBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt FalhasNotificacaoBucket.Arn
+              - !Sub "${FalhasNotificacaoBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
 
   # ---------------------------------------------------------------------------
-  # API Gateway (REST) com API key, throttling e validação do corpo
+  # Submissão sem login individual. A API key identifica o cliente para consumo, não o aluno.
   # ---------------------------------------------------------------------------
   AvaliacaoApi:
     Type: AWS::Serverless::Api
     Properties:
       Name: !Sub "${AWS::StackName}-api"
       StageName: !Ref Stage
+      ApiKeySourceType: HEADER
       TracingEnabled: true
       Auth:
         ApiKeyRequired: true
@@ -230,8 +299,17 @@ Resources:
                   kms:ViaService: !Sub "sns.${AWS::Region}.${AWS::URLSuffix}"
                   kms:EncryptionContext:aws:sns:topicArn: !Ref NotificacaoTopic
             - Effect: Allow
-              Action: sqs:SendMessage
-              Resource: !GetAtt NotificacaoDLQ.Arn
+              Action: s3:ListBucket
+              Resource: !GetAtt FalhasNotificacaoBucket.Arn
+              Condition:
+                StringEquals:
+                  s3:ResourceAccount: !Ref AWS::AccountId
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub "${FalhasNotificacaoBucket.Arn}/aws/lambda/*"
+              Condition:
+                StringEquals:
+                  s3:ResourceAccount: !Ref AWS::AccountId
       Events:
         StreamAvaliacoes:
           Type: DynamoDB
@@ -247,8 +325,8 @@ Resources:
               - ReportBatchItemFailures
             DestinationConfig:
               OnFailure:
-                Type: SQS
-                Destination: !GetAtt NotificacaoDLQ.Arn
+                # Permissões S3 explícitas acima; omite Type para não gerar uma política SAM mais ampla.
+                Destination: !GetAtt FalhasNotificacaoBucket.Arn
             FilterCriteria:
               Filters:
                 - Pattern: '{"eventName":["INSERT"],"dynamodb":{"NewImage":{"urgencia":{"S":["CRITICA"]}}}}'
@@ -336,7 +414,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-receber-avaliacao-erros"
-      AlarmDescription: A função receber-avaliacao registrou erros.
+      AlarmDescription: Falhas de execução da Lambda (exceções não tratadas ou timeouts). Falhas de persistência tratadas como HTTP 500 são monitoradas pelo alarme api-5xx.
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -383,11 +461,28 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmesTopic]
 
+  ArquivamentoFalhasAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-arquivamento-falhas"
+      AlarmDescription: O Lambda não conseguiu preservar um lote com falha no destino S3.
+      Namespace: AWS/Lambda
+      MetricName: DestinationDeliveryFailures
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref NotificarUrgenciaFunction }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmesTopic]
+
   Api5xxAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-api-5xx"
-      AlarmDescription: A API retornou erros 5XX.
+      AlarmDescription: Respostas HTTP 5XX da API, incluindo falhas de persistência tratadas por receber-avaliacao. Dispara com pelo menos uma ocorrência em 5 minutos.
       Namespace: AWS/ApiGateway
       MetricName: 5XXError
       Dimensions:
@@ -405,7 +500,7 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "${AWS::StackName}-dlq-mensagens"
-      AlarmDescription: Há notificações críticas na DLQ que não foram entregues.
+      AlarmDescription: Há avisos de lotes de notificações aguardando recuperação na DLQ.
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
@@ -417,6 +512,92 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmesTopic]
+
+  # Políticas de acesso humano: sem associação automática a usuários, grupos ou roles.
+  # O provisionador as vincula a identidades federadas autorizadas, com MFA no provedor de identidade.
+  ObservacaoPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-observacao"
+      Description: Observação da aplicação sem leitura de avaliações, arquivos de falha ou API key.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Ref AWS::StackId
+          - Effect: Allow
+            Action: [lambda:GetFunctionConfiguration]
+            Resource:
+              - !GetAtt ReceberAvaliacaoFunction.Arn
+              - !GetAtt NotificarUrgenciaFunction.Arn
+              - !GetAtt RelatorioSemanalFunction.Arn
+          - Effect: Allow
+            Action: dynamodb:DescribeTable
+            Resource: [!GetAtt AvaliacoesTable.Arn, !GetAtt EnviosTable.Arn]
+          - Effect: Allow
+            Action: [logs:DescribeLogStreams, logs:GetLogEvents, logs:FilterLogEvents]
+            Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:*"
+          - Effect: Allow
+            Action: [cloudwatch:DescribeAlarms, cloudwatch:DescribeAlarmHistory]
+            Resource: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${AWS::StackName}-*"
+          - Effect: Allow
+            Action: cloudwatch:GetDashboard
+            Resource: !Sub "arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/${AWS::StackName}-dashboard"
+          - Effect: Allow
+            Action: [cloudwatch:ListMetrics, cloudwatch:GetMetricData, cloudwatch:GetMetricStatistics, logs:DescribeLogGroups]
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref AWS::Region
+
+  RecuperacaoPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-recuperacao"
+      Description: Recuperação autorizada de notificações e geração manual de relatórios, sem alterar comprovantes de envio.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Ref AWS::StackId
+          - Effect: Allow
+            Action: [sqs:ReceiveMessage, sqs:ChangeMessageVisibility, sqs:DeleteMessage, sqs:GetQueueAttributes]
+            Resource: !GetAtt NotificacaoDLQ.Arn
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub "${FalhasNotificacaoBucket.Arn}/aws/lambda/*"
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt FalhasNotificacaoBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix: ["aws/lambda/*"]
+          - Effect: Allow
+            Action: dynamodb:GetItem
+            Resource: !GetAtt AvaliacoesTable.Arn
+          - Effect: Allow
+            Action: [dynamodb:GetShardIterator, dynamodb:GetRecords]
+            Resource: !Sub "${AvaliacoesTable.Arn}/stream/*"
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: [!GetAtt NotificarUrgenciaFunction.Arn, !GetAtt RelatorioSemanalFunction.Arn]
+
+  GestaoChavePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${AWS::StackName}-gestao-chave"
+      Description: Consulta e administração da API key de consumo desta stack, sem acesso aos feedbacks.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: cloudformation:DescribeStacks
+            Resource: !Ref AWS::StackId
+          - Effect: Allow
+            Action: [apigateway:GET, apigateway:PATCH]
+            Resource: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apikeys/${AvaliacaoApiApiKey}"
 
   Dashboard:
     Type: AWS::CloudWatch::Dashboard
@@ -440,7 +621,7 @@ Resources:
             {
               "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
               "properties": {
-                "title": "Lambda - Erros",
+                "title": "Lambda - Falhas de execução",
                 "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
                 "metrics": [
                   ["AWS/Lambda", "Errors", "FunctionName", "${ReceberAvaliacaoFunction}"],
@@ -486,10 +667,10 @@ Resources:
 
 Outputs:
   ApiUrl:
-    Description: Endpoint de entrada (POST). Enviar o header x-api-key.
+    Description: Submissão sem login individual (POST). x-api-key é exigida para controle de consumo.
     Value: !Sub "https://${AvaliacaoApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/avaliacao"
   ApiKeyId:
-    Description: ID da API key (recupere o valor no console ou com `aws apigateway get-api-key --include-value`).
+    Description: ID da chave de consumo, não uma identidade de aluno. Somente o gestor autorizado consulta seu valor.
     Value: !Ref AvaliacaoApiApiKey
   TabelaAvaliacoes:
     Value: !Ref AvaliacoesTable
@@ -497,5 +678,17 @@ Outputs:
     Value: !Ref EnviosTable
   TopicoNotificacoes:
     Value: !Ref NotificacaoTopic
+  NotificacaoDLQUrl:
+    Value: !Ref NotificacaoDLQ
+  FalhasNotificacaoBucketNome:
+    Value: !Ref FalhasNotificacaoBucket
+  NotificarUrgenciaFunctionArn:
+    Value: !GetAtt NotificarUrgenciaFunction.Arn
+  PoliticaObservacaoArn:
+    Value: !Ref ObservacaoPolicy
+  PoliticaRecuperacaoArn:
+    Value: !Ref RecuperacaoPolicy
+  PoliticaGestaoChaveArn:
+    Value: !Ref GestaoChavePolicy
   Dashboard:
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-dashboard"

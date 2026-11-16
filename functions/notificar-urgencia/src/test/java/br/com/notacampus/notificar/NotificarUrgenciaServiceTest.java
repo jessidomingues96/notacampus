@@ -70,8 +70,8 @@ public class NotificarUrgenciaServiceTest {
     public void ignoraNaoCriticosEEventosQueNaoSaoInsert() {
         NotificadorFalso notificador = new NotificadorFalso();
         var falhas = new NotificarUrgenciaService(notificador, new EnvioIdempotente(new RegistroEnviosMemoria())).processar(List.of(
-                registro("1", "INSERT", "MEDIA"),
-                registro("2", "INSERT", "BAIXA"),
+                registro("1", "INSERT", "NORMAL"),
+                registro("2", "INSERT", "ATENCAO"),
                 registro("3", "MODIFY", "CRITICA"),
                 registro("4", "REMOVE", "CRITICA")));
 

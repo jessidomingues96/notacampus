@@ -5,14 +5,14 @@ package br.com.notacampus.receber;
  *
  * <ul>
  *   <li>0 a 3 &rarr; {@link #CRITICA}</li>
- *   <li>4 a 6 &rarr; {@link #BAIXA}</li>
- *   <li>7 a 10 &rarr; {@link #MEDIA}</li>
+ *   <li>4 a 6 &rarr; {@link #ATENCAO}</li>
+ *   <li>7 a 10 &rarr; {@link #NORMAL}</li>
  * </ul>
  */
 public enum Urgencia {
     CRITICA,
-    BAIXA,
-    MEDIA;
+    ATENCAO,
+    NORMAL;
 
     public static final int NOTA_MIN = 0;
     public static final int NOTA_MAX = 10;
@@ -25,8 +25,8 @@ public enum Urgencia {
             return CRITICA;
         }
         if (nota <= 6) {
-            return BAIXA;
+            return ATENCAO;
         }
-        return MEDIA;
+        return NORMAL;
     }
 }

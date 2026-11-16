@@ -73,6 +73,7 @@ public final class ReceberAvaliacaoService {
             repositorio.salvar(avaliacao);
         } catch (RuntimeException e) {
             LOG.log(System.Logger.Level.ERROR, "Falha ao gravar avaliação", e);
+            // Resposta tratada: o HTTP 500 é monitorado por Api5xxAlarm, não por Lambda Errors.
             return erro(500, "Erro interno ao registrar a avaliação.");
         }
 

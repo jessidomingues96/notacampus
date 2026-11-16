@@ -6,6 +6,7 @@ import static org.junit.Assert.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.amazonaws.services.lambda.runtime.events.APIGatewayProxyRequestEvent;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -55,11 +56,13 @@ public class ReceberAvaliacaoServiceTest {
     }
 
     @Test
-    public void classificaNotasAltasEMedias() {
-        servico.processar("{\"descricao\":\"ok\",\"nota\":5}");
-        servico.processar("{\"descricao\":\"ótima\",\"nota\":9}");
-        assertEquals(Urgencia.BAIXA, repo.salvas.get(0).urgencia());
-        assertEquals(Urgencia.MEDIA, repo.salvas.get(1).urgencia());
+    public void classificaNotasDeAtencaoENormais() throws Exception {
+        var atencao = servico.processar("{\"descricao\":\"ok\",\"nota\":5}");
+        var normal = servico.processar("{\"descricao\":\"ótima\",\"nota\":9}");
+        assertEquals(Urgencia.ATENCAO, repo.salvas.get(0).urgencia());
+        assertEquals(Urgencia.NORMAL, repo.salvas.get(1).urgencia());
+        assertEquals("ATENCAO", MAPPER.readTree(atencao.corpo()).get("urgencia").asText());
+        assertEquals("NORMAL", MAPPER.readTree(normal.corpo()).get("urgencia").asText());
     }
 
     @Test
@@ -101,6 +104,20 @@ public class ReceberAvaliacaoServiceTest {
             assertEquals("Corpo: " + corpo, 400, resposta.status());
             assertTrue(resposta.corpo().contains("\"erro\""));
         }
+        assertTrue(repo.salvas.isEmpty());
+    }
+
+    @Test
+    public void handlerPropagaFalhaDePersistenciaComo500ParaApiGateway() throws Exception {
+        repo.falha = new IllegalStateException("segredo interno");
+        var evento = new APIGatewayProxyRequestEvent().withBody("{\"descricao\":\"ok\",\"nota\":5}");
+
+        var resposta = new ReceberAvaliacaoHandler(servico).handleRequest(evento, null);
+
+        assertEquals(Integer.valueOf(500), resposta.getStatusCode());
+        assertEquals("application/json", resposta.getHeaders().get("Content-Type"));
+        assertEquals("Erro interno ao registrar a avaliação.", MAPPER.readTree(resposta.getBody()).get("erro").asText());
+        assertFalse(resposta.getBody().contains("segredo"));
         assertTrue(repo.salvas.isEmpty());
     }
 

@@ -27,7 +27,7 @@ public final class RelatorioService {
     private static final DateTimeFormatter DATA = DateTimeFormatter.ofPattern("dd/MM/yyyy");
     private static final DateTimeFormatter DATA_HORA = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
 
-    public static final List<String> URGENCIAS = List.of("CRITICA", "MEDIA", "BAIXA");
+    public static final List<String> URGENCIAS = List.of("CRITICA", "ATENCAO", "NORMAL");
     // Margem abaixo dos 256 KiB permitidos pelo SNS para tópicos com assinatura de e-mail.
     static final int LIMITE_MENSAGEM_BYTES = 240 * 1024;
 

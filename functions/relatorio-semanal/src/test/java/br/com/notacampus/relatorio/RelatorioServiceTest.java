@@ -45,8 +45,8 @@ public class RelatorioServiceTest {
     public void consolidaMediaEContagens() {
         var resumo = RelatorioService.consolidar(List.of(
                 av("2026-11-13", 2, "CRITICA", "a"),
-                av("2026-11-13", 8, "MEDIA", "b"),
-                av("2026-11-15", 5, "BAIXA", "c")), TRES_DIAS);
+                av("2026-11-13", 8, "NORMAL", "b"),
+                av("2026-11-15", 5, "ATENCAO", "c")), TRES_DIAS);
 
         assertEquals(3, resumo.total());
         assertEquals(5.0, resumo.media(), 0.0001);
@@ -54,16 +54,35 @@ public class RelatorioServiceTest {
         assertEquals(0, (int) resumo.porDia().get(LocalDate.of(2026, 11, 14)));
         assertEquals(1, (int) resumo.porDia().get(LocalDate.of(2026, 11, 15)));
         assertEquals(1, (int) resumo.porUrgencia().get("CRITICA"));
-        assertEquals(1, (int) resumo.porUrgencia().get("MEDIA"));
-        assertEquals(1, (int) resumo.porUrgencia().get("BAIXA"));
+        assertEquals(1, (int) resumo.porUrgencia().get("NORMAL"));
+        assertEquals(1, (int) resumo.porUrgencia().get("ATENCAO"));
+    }
+
+    @Test
+    public void relatorioAgrupaHistoricoENovosRegistrosComOsNomesAtuais() {
+        var avaliacoes = List.of(
+                av("2026-11-13", 2, "CRITICA", "Crítica"),
+                av("2026-11-13", 4, "BAIXA", "Atenção antiga"),
+                av("2026-11-14", 6, "ATENCAO", "Atenção nova"),
+                av("2026-11-14", 7, "MEDIA", "Normal antiga"),
+                av("2026-11-15", 10, "NORMAL", "Normal nova"));
+        var resumo = RelatorioService.consolidar(avaliacoes, TRES_DIAS);
+        assertEquals(Map.of("CRITICA", 1, "ATENCAO", 2, "NORMAL", 2), resumo.porUrgencia());
+        String corpo = RelatorioService.formatar(TRES_DIAS, resumo, avaliacoes).corpo();
+        assertTrue(corpo.contains("ATENCAO: 2"));
+        assertTrue(corpo.contains("NORMAL: 2"));
+        assertTrue(corpo.contains("Atenção antiga | ATENCAO"));
+        assertTrue(corpo.contains("Normal antiga | NORMAL"));
+        assertTrue(!corpo.contains("BAIXA"));
+        assertTrue(!corpo.contains("MEDIA"));
     }
 
     @Test
     public void mediaArredondadaEmDuasCasas() {
         var resumo = RelatorioService.consolidar(List.of(
-                av("2026-11-13", 10, "MEDIA", "a"),
-                av("2026-11-13", 10, "MEDIA", "b"),
-                av("2026-11-13", 9, "MEDIA", "c")), TRES_DIAS);
+                av("2026-11-13", 10, "NORMAL", "a"),
+                av("2026-11-13", 10, "NORMAL", "b"),
+                av("2026-11-13", 9, "NORMAL", "c")), TRES_DIAS);
         assertEquals(9.67, resumo.media(), 0.0001);
     }
 
@@ -78,7 +97,7 @@ public class RelatorioServiceTest {
     public void geraEEnviaRelatorioComTodosOsDados() {
         Map<LocalDate, List<Avaliacao>> base = Map.of(
                 LocalDate.of(2026, 11, 14), List.of(av("2026-11-14", 3, "CRITICA", "Áudio ruim")),
-                LocalDate.of(2026, 11, 15), List.of(av("2026-11-15", 9, "MEDIA", "Excelente")));
+                LocalDate.of(2026, 11, 15), List.of(av("2026-11-15", 9, "NORMAL", "Excelente")));
         AvaliacaoConsulta consulta = dia -> base.getOrDefault(dia, List.of());
         NotificadorFalso notificador = new NotificadorFalso();
 
@@ -125,16 +144,16 @@ public class RelatorioServiceTest {
         List<Avaliacao> muitas = new ArrayList<>();
         String descricao = "  Áudio ruim 🙂\nSegunda linha\t" + "x".repeat(950) + "  ";
         for (int i = 0; i < 105; i++) {
-            muitas.add(av("2026-11-15", 5, "BAIXA", i == 0 ? descricao : "texto " + i));
+            muitas.add(av("2026-11-15", 5, "ATENCAO", i == 0 ? descricao : "texto " + i));
         }
         var mensagem = RelatorioService.formatar(
                 List.of(LocalDate.of(2026, 11, 15)),
                 RelatorioService.consolidar(muitas, List.of(LocalDate.of(2026, 11, 15))),
                 muitas);
 
-        assertTrue(mensagem.corpo().contains(descricao + " | BAIXA"));
+        assertTrue(mensagem.corpo().contains(descricao + " | ATENCAO"));
         for (int i = 1; i < 105; i++) {
-            assertTrue(mensagem.corpo().contains("  - texto " + i + " | BAIXA"));
+            assertTrue(mensagem.corpo().contains("  - texto " + i + " | ATENCAO"));
         }
         assertTrue(!mensagem.corpo().contains("lista truncada"));
     }
@@ -143,7 +162,7 @@ public class RelatorioServiceTest {
     public void enviaTodasAsPartesComAcentosEEmojisSemPerderConteudo() {
         List<Avaliacao> muitas = new ArrayList<>();
         for (int i = 0; i < 400; i++) {
-            muitas.add(av("2026-11-15", 5, "BAIXA", "feedback " + i + ": " + "á漢🙂".repeat(140)));
+            muitas.add(av("2026-11-15", 5, "ATENCAO", "feedback " + i + ": " + "á漢🙂".repeat(140)));
         }
         var dias = List.of(LocalDate.of(2026, 11, 15));
         var esperado = RelatorioService.formatar(dias, RelatorioService.consolidar(muitas, dias), muitas);
@@ -171,7 +190,7 @@ public class RelatorioServiceTest {
         var registro = new RegistroEnviosMemoria();
         var notificador = new NotificadorFalso();
         var evento = Map.<String, Object>of("data_fim", "2026-11-15", "dias", 1);
-        var original = new RelatorioService(dia -> List.of(av("2026-11-15", 8, "MEDIA", "original")),
+        var original = new RelatorioService(dia -> List.of(av("2026-11-15", 8, "NORMAL", "original")),
                 notificador, new EnvioIdempotente(registro), RELOGIO).gerar(evento);
         var repetido = new RelatorioService(dia -> { throw new AssertionError("Não deve consultar novamente"); },
                 notificador, new EnvioIdempotente(registro), RELOGIO).gerar(evento);
@@ -184,7 +203,7 @@ public class RelatorioServiceTest {
         var registro = new RegistroEnviosMemoria();
         List<Avaliacao> muitas = new ArrayList<>();
         for (int i = 0; i < 400; i++) {
-            muitas.add(av("2026-11-15", 5, "BAIXA", "feedback " + i + ": " + "á漢🙂".repeat(140)));
+            muitas.add(av("2026-11-15", 5, "ATENCAO", "feedback " + i + ": " + "á漢🙂".repeat(140)));
         }
         var notificador = new NotificadorFalso() {
             boolean falhou;
