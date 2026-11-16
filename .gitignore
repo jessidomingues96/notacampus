@@ -8,7 +8,5 @@ target/
 samconfig.local.toml
 *.zip
 saida.json
-saida.json
-saida.json
-notacampus/
-saida.json
+# Ignora somente uma cópia aninhada do projeto, preservando os pacotes br/com/notacampus.
+/notacampus/
