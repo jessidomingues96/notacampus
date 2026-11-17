@@ -683,5 +683,29 @@ Itens que **permanecem** e devem ser removidos manualmente se quiser zerar o cus
 | `Unable to locate credentials` | Perfil temporário ausente ou sessão expirada | Configurar o perfil SSO e executar `aws sso login --profile <perfil>` (Etapa 3) |
 | `sam build` falha por Java/Maven | JDK 21 ou Maven ausentes no PATH | Instalar e conferir com `java -version` e `mvn -v` |
 | Pipeline: `Not authorized to perform sts:AssumeRoleWithWebIdentity` | `sub` da trust policy incorreto | Usar `...:environment:producao` (Etapa 7.2) |
-| Stack em `ROLLBACK_COMPLETE` | Falha na criação anterior | `sam delete` e fazer o deploy novamente; ver *Events* da stack no CloudFormation |
-| Erro ao criar a tabela já existente | Tabela `Retain` de uma stack anterior | Apagar a tabela antiga manualmente |
+| Destino S3: função sem permissão `PutObject` | Permissão de escrita incompatível com a validação do destino | Permitir `s3:PutObject` em `bucket/*` do bucket exclusivo de falhas, mantendo `s3:ResourceAccount`; conferir também `s3:ListBucket` |
+| Stack em `ROLLBACK_COMPLETE` ou `UPDATE_ROLLBACK_COMPLETE` | Falha no provisionamento anterior | Identificar a causa em *Events*. Após corrigir, atualizar novamente quando o estado permitir; preservar recursos com dados |
+| `AWS::EarlyValidation::ResourceExistenceCheck` ou recurso já existente | Tabela/bucket com `Retain` preservado após rollback, fora do controle da stack | Importar o recurso existente na stack; não apagar a tabela ou o bucket para liberar o nome |
+
+### Recuperar recursos preservados por rollback
+
+Uma atualização que falha pode deixar recursos novos com `DeletionPolicy: Retain` na conta,
+mesmo após removê-los do estado da stack. Na recuperação de 16/11/2026, foram reincorporados
+`EnviosTable` (`notacampus-envios`) e `FalhasNotificacaoBucket`
+(`notacampus-317599963509-sa-east-1-falhas`) por um change set do tipo `IMPORT`.
+
+1. Confirme a conta com `aws sts get-caller-identity` e a região `sa-east-1`. Confira os eventos
+   e as validações do change set para identificar exatamente os recursos preservados.
+2. Obtenha o template **Original da stack atual** com `aws cloudformation get-template`.
+   Acrescente somente as declarações dos recursos a importar, com `DeletionPolicy: Retain`.
+   Preserve os recursos e parâmetros existentes. Remova dependências para recursos que ainda
+   não pertencem à stack, deixando sua restauração para o deploy seguinte.
+3. Crie um change set `IMPORT` com `--resources-to-import`, usando `TableName` e `BucketName`
+   como identificadores. Reutilize os valores dos parâmetros com `UsePreviousValue=true`.
+4. Antes de executar, confira com `describe-change-set` que existem somente ações `Import`
+   para os recursos esperados, sem criação, alteração ou exclusão de outros recursos.
+5. Execute o change set e aguarde `IMPORT_COMPLETE`. Verifique as diferenças dos recursos
+   importados com `detect-stack-resource-drift`. Em seguida, reexecute a pipeline normal
+   para aplicar o template completo e realizar a verificação pós-deploy.
+
+Referência: [Importação manual de recursos no CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/import-resources-manually.html).
