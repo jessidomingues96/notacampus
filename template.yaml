@@ -306,7 +306,9 @@ Resources:
                   s3:ResourceAccount: !Ref AWS::AccountId
             - Effect: Allow
               Action: s3:PutObject
-              Resource: !Sub "${FalhasNotificacaoBucket.Arn}/aws/lambda/*"
+              # A validação do destino S3 pela Lambda exige escrita nos objetos do bucket.
+              # O bucket é exclusivo para falhas e a condição impede uso em outra conta.
+              Resource: !Sub "${FalhasNotificacaoBucket.Arn}/*"
               Condition:
                 StringEquals:
                   s3:ResourceAccount: !Ref AWS::AccountId

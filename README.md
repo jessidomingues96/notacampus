@@ -248,7 +248,7 @@ aws lambda invoke --function-name notacampus-relatorio-semanal --region sa-east-
 | Resiliência | Retentativas do Stream até a idade máxima de 1 hora, *bisect batch*, falhas parciais (`batchItemFailures`), arquivo completo no S3 e aviso SQS para recuperação |
 | Idempotência | Chave `URGENCIA#<id da avaliação>`; alertas confirmados não são publicados novamente pela aplicação |
 | Variáveis de ambiente | `TOPIC_ARN`, `ENVIOS_TABLE_NAME` |
-| Permissões IAM | `sns:Publish` no tópico; `s3:ListBucket` no bucket de falhas e `s3:PutObject` no prefixo `aws/lambda/`, limitados à conta; `GetItem`/`PutItem`/`UpdateItem` na tabela de envios, apenas para chaves `URGENCIA#*`; `kms:GenerateDataKey*` e `kms:Decrypt` na chave `alias/aws/sns`, somente via SNS para este tópico |
+| Permissões IAM | `sns:Publish` no tópico; `s3:ListBucket` no bucket exclusivo de falhas e `s3:PutObject` nos objetos desse bucket (necessário à validação do destino pela Lambda), limitados à conta; `GetItem`/`PutItem`/`UpdateItem` na tabela de envios, apenas para chaves `URGENCIA#*`; `kms:GenerateDataKey*` e `kms:Decrypt` na chave `alias/aws/sns`, somente via SNS para este tópico |
 
 ### `relatorio-semanal`
 | | |
