@@ -372,11 +372,20 @@ Política inline de provisionamento (ajuste conta, stack e região):
       "Sid": "RolesDasFuncoes",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:PassRole", "iam:TagRole",
+        "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:TagRole",
         "iam:UpdateAssumeRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy",
         "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy", "iam:ListRolePolicies"
       ],
       "Resource": "arn:aws:iam::317599963509:role/notacampus-*"
+    },
+    {
+      "Sid": "PassarRolesAoLambda",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::317599963509:role/notacampus-*",
+      "Condition": {
+        "StringEquals": {"iam:PassedToService": "lambda.amazonaws.com"}
+      }
     }
   ]
 }
@@ -385,6 +394,12 @@ Política inline de provisionamento (ajuste conta, stack e região):
 Se o deploy falhar com `AccessDenied`, identifique a operação e revise a ação e o recurso
 necessários. A ampliação de permissões deve acompanhar a necessidade do provisionamento;
 não anexe políticas administrativas amplas aos perfis operacionais para contornar o erro.
+
+`PowerUserAccess` isoladamente não cobre o gerenciamento IAM necessário ao CloudFormation.
+Na role de deploy deste projeto, a política em linha `notacampus-provisionamento-iam`
+complementa as permissões existentes com as três instruções IAM acima: `PoliticasOperacionais`,
+`RolesDasFuncoes` e `PassarRolesAoLambda`. Ela se limita aos recursos `notacampus-*` da conta
+documentada; o passe de roles só é permitido para o serviço Lambda.
 
 ### 7.4 Configurar o GitHub
 
