@@ -284,7 +284,7 @@ IAM → *Roles* → *Create role* → *Custom trust policy*. Cole (ajustando con
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:<ORG_OU_USUARIO>/<REPOSITORIO>:environment:producao"
+          "token.actions.githubusercontent.com:sub": "repo:jessidomingues96@301527482/notacampus@1460573308:environment:producao"
         }
       }
     }
@@ -295,6 +295,15 @@ IAM → *Roles* → *Create role* → *Custom trust policy*. Cole (ajustando con
 > **Importante:** o job de deploy usa `environment: producao`, e nesse caso o GitHub emite o
 > `sub` como `...:environment:producao` — e **não** `...:ref:refs/heads/main`. Se usar o valor
 > errado, o pipeline falha com *Not authorized to perform sts:AssumeRoleWithWebIdentity*.
+
+O exemplo acima usa o identificador imutável habilitado neste repositório. Antes de configurar
+outro repositório, consulte sua configuração com
+`gh api repos/<ORG_OU_USUARIO>/<REPOSITORIO>/actions/oidc/customization/sub`.
+Quando `use_immutable_subject` for `true`, use o `sub_claim_prefix` retornado e acrescente
+`:environment:producao`. Neste projeto, o prefixo é
+`repo:jessidomingues96@301527482/notacampus@1460573308`; usar apenas os nomes, sem os IDs,
+não corresponde à identidade emitida. Se o repositório tiver um modelo de `sub` personalizado,
+ajuste a confiança conforme esse modelo.
 
 Nome sugerido da role: `github-deploy-notacampus`. O ARN será
 `arn:aws:iam::317599963509:role/github-deploy-notacampus` — esse é o valor do secret `AWS_DEPLOY_ROLE_ARN`.
