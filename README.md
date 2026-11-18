@@ -7,17 +7,22 @@ avaliações.
 | Ambiente AWS | |
 |---|---|
 | Account ID | `317599963509` |
-| ARN da conta | `arn:aws:account::317599963509:account` |
 | Região | **América do Sul (São Paulo) — `sa-east-1`** |
 | Stack CloudFormation | `notacampus` |
+
+## Documentação da entrega
+
+O documento de entrega reúne a descrição da solução, arquitetura, funções, deploy, monitoramento e governança.
+Este README apresenta os detalhes técnicos, e o [guia AWS](docs/passo-a-passo-aws.md)
+contém os procedimentos operacionais completos.
 
 ## 1. Modelo de cloud escolhido
 
 | Decisão | Escolha | Justificativa |
 |---|---|---|
 | Provedor / modelo de implantação | **Nuvem pública — AWS** | Serviços gerenciados e custo por uso, adequado a créditos limitados. |
-| Modelo de serviço | **FaaS (AWS Lambda) + serviços gerenciados (PaaS)** | Sem servidores para administrar; escala a zero. |
-| Linguagem / runtime | **Java 21** (`java21`, arm64) | 100% Java, Maven, testes JUnit. |
+| Modelo de serviço | **FaaS (AWS Lambda) + serviços gerenciados (PaaS)** | Sem servidores para administrar; funções executadas sob demanda. |
+| Linguagem / runtime | **Java 21** (`java21`, arm64) | Funções em Java, Maven e testes JUnit; scripts auxiliares em Python. |
 | Infraestrutura como código | **AWS SAM (CloudFormation)** | Ambiente versionado e reproduzível com `sam deploy`. |
 | CI/CD | **GitHub Actions + OIDC** | Deploy automatizado sem chaves de longa duração. |
 
@@ -89,8 +94,7 @@ preservam seu conteúdo original nas retentativas.
 │   └── relatorio-semanal/          # idem (pacote br.com.notacampus.relatorio)
 ├── events/relatorio-evento.json    # Evento de exemplo para o relatório
 ├── docs/
-│   ├── passo-a-passo-aws.md        # Configuração completa na AWS
-│   └── roteiro-video.md            # Roteiro da demonstração
+│   └── passo-a-passo-aws.md        # Configuração completa na AWS
 └── .github/workflows/deploy.yml    # CI/CD
 ```
 
@@ -115,27 +119,36 @@ Passo a passo completo (conta, credenciais, OIDC, permissões): [`docs/passo-a-p
 ### Pré-requisitos
 - Conta AWS e [AWS CLI](https://docs.aws.amazon.com/cli/) configurado (região `sa-east-1`)
 - [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html)
-- **JDK 21** e **Apache Maven 3.9+**
+- **JDK 21**, **Apache Maven 3.9+**, **Python 3.12** e Git
 
 ### Deploy manual
 
+Use uma sessão autorizada na conta `317599963509`. Confira a identidade antes de prosseguir;
+se a conta retornada for diferente, troque a sessão ou o perfil AWS.
+
 ```bash
+export AWS_DEFAULT_REGION=sa-east-1
+aws sts get-caller-identity
+ADMIN_EMAIL='administrador@exemplo.com'       # substitua pelo destinatário autorizado
 python3 scripts/validar_testes.py --fontes    # exige fontes e testes em cada função
 mvn -B clean test                            # testes JUnit; falha se não houver testes
 python3 scripts/validar_testes.py --relatorios # exige testes realmente executados por função
 python3 scripts/validar_testes.py --python    # suíte Python obrigatória
 sam validate --lint                          # valida o template
 sam build                                    # compila as funções com Maven
-sam deploy --parameter-overrides AdminEmail=seu-email@exemplo.com
+sam deploy --stack-name notacampus --region sa-east-1 \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides "AdminEmail=$ADMIN_EMAIL" Stage=prod
 ```
 
 1. **Confirme as assinaturas**: a AWS envia 2 e-mails (notificações e alarmes). Clique em
    *Confirm subscription* em ambos — sem isso nenhum e-mail é entregue.
 2. Ao final, o `sam deploy` exibe os *Outputs* (`ApiUrl`, `ApiKeyId`, `Dashboard`...).
-3. Recupere o valor da API key:
+3. Recupere o valor da API key em uma variável, sem imprimi-lo ou incluí-lo no vídeo:
 
 ```bash
-aws apigateway get-api-key --api-key <ApiKeyId> --include-value --query value --output text --region sa-east-1
+API_KEY_ID="<ApiKeyId do output>"
+API_KEY=$(aws apigateway get-api-key --api-key "$API_KEY_ID" --include-value --query value --output text --region sa-east-1)
 ```
 
 ### Deploy automatizado (GitHub Actions)
@@ -166,13 +179,21 @@ token OIDC está disponível apenas no job de deploy.
 1. Crie na AWS um provedor OIDC para `token.actions.githubusercontent.com` e a role
    `github-deploy-notacampus` (ARN: `arn:aws:iam::317599963509:role/github-deploy-notacampus`), com
    *trust policy* restrita ao repositório e ao environment do job de deploy
-   (`repo:<org>/<repo>:environment:producao`). Políticas completas em
+   (`repo:jessidomingues96@301527482/notacampus@1460573308:environment:producao`).
+   Este repositório usa identificadores imutáveis no `sub`; o formato somente com nomes não corresponde
+   ao token emitido. O audience deve ser `sts.amazonaws.com`. Políticas completas em
    [`docs/passo-a-passo-aws.md`](docs/passo-a-passo-aws.md).
 2. No GitHub, em *Settings → Secrets and variables → Actions*, crie:
    - Secret `AWS_DEPLOY_ROLE_ARN` — ARN da role
    - Secret `ADMIN_EMAIL` — e-mail do administrador
    - Variable `AWS_REGION` (opcional; padrão `sa-east-1`)
-3. Crie o *Environment* `producao` (opcionalmente com aprovação manual).
+3. Crie o *Environment* `producao` (opcionalmente com aprovação manual). Se os mesmos secrets
+   existirem nesse environment, seus valores prevalecem sobre os cadastrados no repositório.
+
+A role de deploy usa `PowerUserAccess` complementada pela política em linha
+`notacampus-provisionamento-iam`, limitada ao gerenciamento IAM de recursos `notacampus-*`
+e a passar roles ao serviço Lambda. São privilégios de provisionamento; os operadores cotidianos
+usam os perfis separados descritos na seção de governança.
 
 Para repetir somente a verificação pós-deploy:
 
@@ -194,7 +215,8 @@ sam delete
 ```
 As tabelas DynamoDB usam `DeletionPolicy: Retain` (proteção dos dados) e **permanecem** após o
 `sam delete`. A tabela `envios` preserva também os comprovantes de envio e os textos dos relatórios;
-sua remoção permite que eventos antigos sejam enviados novamente.
+sua remoção permite que eventos antigos sejam enviados novamente. O bucket S3 de falhas e suas
+versões também são preservados; esses recursos continuam sujeitos a cobrança.
 
 ## 5. Como usar / testar
 
@@ -335,10 +357,28 @@ confirma automaticamente esses avisos quando não consegue reconstruir o lote.
 |---|---|
 | **CloudWatch Logs** | Logs com retenção configurável (padrão 30 dias). A descrição do feedback **não** é logada. |
 | **Alarmes** | Erros em cada uma das 3 funções · falha no arquivamento dos eventos (`DestinationDeliveryFailures`) · 5XX no API Gateway · mensagens na DLQ |
-| **Notificação de alarmes** | Alarmes → SNS `alarmes` → e-mail do administrador |
+| **Notificação de alarmes** | Alarmes → SNS `notacampus-alarmes` → e-mail do administrador |
 | **Dashboard** | `notacampus-dashboard`: invocações, erros, requisições/4XX/5XX, latência e DLQ |
 | **X-Ray** | Tracing ativo nas funções e no API Gateway |
 | **Métricas do API Gateway** | Habilitadas (`MetricsEnabled`) |
+
+### Configuração dos alarmes
+
+O template cria seis alarmes. Todos usam período de **300 segundos**, um período de avaliação,
+limiar **maior ou igual a 1** e dados ausentes como `notBreaching`.
+Para a stack `notacampus` e o stage `prod`:
+
+| Alarme | Namespace / métrica | Estatística | Dimensões |
+|---|---|---|---|
+| `notacampus-receber-avaliacao-erros` | `AWS/Lambda` / `Errors` | Sum | `FunctionName=notacampus-receber-avaliacao` |
+| `notacampus-notificar-urgencia-erros` | `AWS/Lambda` / `Errors` | Sum | `FunctionName=notacampus-notificar-urgencia` |
+| `notacampus-relatorio-semanal-erros` | `AWS/Lambda` / `Errors` | Sum | `FunctionName=notacampus-relatorio-semanal` |
+| `notacampus-arquivamento-falhas` | `AWS/Lambda` / `DestinationDeliveryFailures` | Sum | `FunctionName=notacampus-notificar-urgencia` |
+| `notacampus-api-5xx` | `AWS/ApiGateway` / `5XXError` | Sum | `ApiName=notacampus-api`, `Stage=prod` |
+| `notacampus-dlq-mensagens` | `AWS/SQS` / `ApproximateNumberOfMessagesVisible` | Maximum | `QueueName=notacampus-notificacao-dlq` |
+
+Consulte-os em **CloudWatch → Alarms** na região `sa-east-1`. A assinatura do tópico
+`notacampus-alarmes` precisa estar confirmada para receber os alertas por e-mail.
 
 ### Qual alarme detecta cada falha
 
@@ -397,6 +437,12 @@ federadas já autorizadas. MFA e sessões temporárias são configurados no prov
 O modelo não cria usuários IAM, senhas ou chaves de acesso permanentes. A associação efetiva e o MFA
 precisam ser configurados na conta; as políticas sozinhas não os habilitam.
 
+No IAM Identity Center, crie permission sets com as políticas gerenciadas pelo cliente
+`notacampus-observacao`, `notacampus-recuperacao` e `notacampus-gestao-chave` (caminho `/`).
+Atribua cada perfil somente aos grupos autorizados na conta `317599963509`, configure MFA no
+provedor e use sessões temporárias. Para validar, confira a identidade da sessão e execute uma
+operação permitida e outra negada por perfil, sem acumular políticas amplas que invalidem o teste.
+
 Observação não permite ler itens DynamoDB, arquivos de falha nem a chave de consumo. As consultas
 de métricas e listagens de grupos de log que exigem `Resource: "*"` são limitadas à região, mas podem
 mostrar metadados de outros recursos dessa região. Recuperação dá acesso a conteúdos restritos
@@ -431,16 +477,17 @@ Procedimentos para associar os perfis e verificar suas permissões estão no
 - **Proteção de dados:** *Point-in-Time Recovery* no DynamoDB; tabela com `DeletionPolicy: Retain`.
 - **Privacidade:** conteúdo dos feedbacks fora dos logs; mensagens de erro genéricas ao cliente.
 - **CI/CD sem segredos de longa duração:** OIDC com role assumida por repositório/environment.
-- **Rastreabilidade:** infraestrutura como código versionado; mudanças passam por PR + testes.
+- **Rastreabilidade:** infraestrutura versionada; testes em pushes e PRs. Exigir revisão e impedir bypass da `main` depende das regras de proteção configuradas no GitHub.
 
 ### Limitações conhecidas / próximos passos
 - O tópico de alarmes não usa KMS gerenciado (o CloudWatch não consegue publicar em tópicos com `aws/sns`); use uma chave KMS própria para cifrá-lo.
 - Se for necessário identificar alunos ou comprovar vínculo com turmas, adicionar autenticação e autorização (por exemplo, Cognito ou autorizador integrado ao provedor da instituição). A API key pode continuar como controle de consumo; WAF é um controle adicional contra abuso.
-- Cold start de Java: mitigado com `TieredStopAtLevel=1`; para reduzir mais, habilitar Lambda SnapStart.
+- Cold start de Java: usa `TieredStopAtLevel=1`; melhorias adicionais dependem de medição e validação de compatibilidade com a configuração adotada.
 - E-mails via SNS são texto simples; para HTML/anexos, trocar por Amazon SES.
 
 ## 9. Custos
 
 Todos os serviços são *pay-per-use* (Lambda, API Gateway, DynamoDB on-demand, SNS, SQS, S3, EventBridge).
-Para o volume de uma demonstração, o custo fica dentro da camada gratuita da AWS (alarmes
-CloudWatch além de 10 e dashboards além de 3 são cobrados).
+O custo depende do uso e da elegibilidade da conta aos benefícios da AWS; não há garantia de
+custo zero. Inclua no acompanhamento os alarmes, logs, backups PITR e versões de objetos S3,
+além dos recursos preservados após a remoção da stack.
